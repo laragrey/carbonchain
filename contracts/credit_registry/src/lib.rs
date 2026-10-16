@@ -48,7 +48,8 @@ use crate::storage::{
     get_credits_by_owner, get_credits_by_project, get_issuers, get_methodologies, get_min_stake,
     get_next_verifier_id, get_nonce, get_pending_credits_by_verifier, get_required_approvals,
     get_retirement_contract, get_session, get_session_op_count, get_total_credits,
-    get_unbonding_request, get_verifier_id, get_verifier_reputation, get_verifier_services_for,
+    get_unbonding_request, get_verifier_id, get_verifier_pending_count,
+    get_verifier_reputation, get_verifier_services_for,
     get_verifier_stake, get_verifier_stake_token, get_verifiers, get_version, has_admin,
     increment_approval_count, increment_dispute_count, increment_session_op_count,
     increment_total_credits, increment_verifier_pending, is_issuer as storage_is_issuer,
@@ -264,6 +265,11 @@ impl CreditRegistry {
     /// Returns the total number of registered verifiers.
     pub fn get_verifier_count(env: Env) -> u32 {
         get_verifiers(&env).len()
+    }
+
+    /// Returns the number of pending credits assigned to `verifier`.
+    pub fn get_verifier_pending_count(env: Env, verifier: Address) -> u64 {
+        get_verifier_pending_count(&env, &verifier)
     }
 
     /// Returns up to the first 50 verifiers. Use `list_verifiers_paginated` for larger sets.
@@ -2271,6 +2277,41 @@ mod tests {
         assert_eq!(p1.get(0).unwrap(), addrs.get(2).unwrap());
         let p2 = client.list_verifiers_paginated(&2, &2);
         assert_eq!(p2.len(), 1);
+    }
+
+    // ── get_verifier_pending_count (issue #1075) ───────────────────────────────
+
+    #[test]
+    fn test_get_verifier_pending_count_tracks_submit_and_approve() {
+        let (env, client, admin, verifier) = setup();
+        let anonce = client.get_nonce(&admin);
+        client.register_verifier(&admin, &verifier, &anonce);
+
+        // Initially a verifier with no pending credits reports zero.
+        assert_eq!(client.get_verifier_pending_count(&verifier), 0);
+        assert_eq!(
+            crate::storage::get_pending_credits_by_verifier(&env, &verifier).len() as u64,
+            0
+        );
+
+        // Submit a credit — the verifier's pending count should increment.
+        let issuer = Address::generate(&env);
+        let id = submit_test_credit(&env, &client, &admin, &issuer);
+        assert_eq!(client.get_verifier_pending_count(&verifier), 1);
+        assert_eq!(
+            crate::storage::get_pending_credits_by_verifier(&env, &verifier).len() as u64,
+            client.get_verifier_pending_count(&verifier),
+            "pending count must match PendingCreditsByVerifier list length"
+        );
+
+        // Approve and mint — the verifier's pending count should decrement back to zero.
+        let vnonce = client.get_nonce(&verifier);
+        client.approve_and_mint(&verifier, &id, &vnonce);
+        assert_eq!(client.get_verifier_pending_count(&verifier), 0);
+        assert_eq!(
+            crate::storage::get_pending_credits_by_verifier(&env, &verifier).len() as u64,
+            0
+        );
     }
 
     // ── Issue #541: get_credit_count / get_credits_by_owner_paginated ────────
